@@ -43,9 +43,7 @@ object NetworkModule {
     @Singleton
     @Named("classifier")
     fun provideClassifierRetrofit(client: OkHttpClient): Retrofit = Retrofit.Builder()
-        // Emulator: 10.0.2.2 = localhost của máy host
-        .baseUrl("http://10.0.2.2:5000/")
-        // Device thật: thay bằng IP máy tính (VD: http://192.168.1.100:5000/)
+        .baseUrl("https://Hung371-document-classifier.hf.space/")
         .client(client)
         .addConverterFactory(GsonConverterFactory.create())
         .build()

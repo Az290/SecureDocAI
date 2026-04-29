@@ -1,11 +1,13 @@
 package com.securedoc.ai.presentation.scanner
 
 import android.Manifest
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.animation.*
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -63,37 +65,14 @@ fun ScannerScreen(viewModel: ScannerViewModel = hiltViewModel()) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Tab Bar
-        TabRow(
-            selectedTabIndex = selectedTab,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Tab(
-                selected = selectedTab == 0,
-                onClick = { selectedTab = 0 },
-                text = { Text("📸 Scan") }
-            )
-            Tab(
-                selected = selectedTab == 1,
-                onClick = { selectedTab = 1 },
-                text = { Text("📋 History (${documentCount})") }
-            )
+        TabRow(selectedTabIndex = selectedTab) {
+            Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("📸 Scan") })
+            Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("📋 History ($documentCount)") })
         }
 
-        // Content
         when (selectedTab) {
-            0 -> ScanTabContent(
-                viewModel = viewModel,
-                context = context,
-                lifecycleOwner = lifecycleOwner,
-                cameraPermission = cameraPermission,
-                imageCapture = imageCapture,
-                onImageCaptureChange = { imageCapture = it }
-            )
-            1 -> HistoryTabContent(
-                viewModel = viewModel,
-                recentDocuments = recentDocuments
-            )
+            0 -> ScanTabContent(viewModel, context, lifecycleOwner, cameraPermission, imageCapture) { imageCapture = it }
+            1 -> HistoryTabContent(viewModel, recentDocuments)
         }
     }
 }
@@ -114,32 +93,21 @@ fun ScanTabContent(
     val summary by viewModel.summary.collectAsState()
     val isProcessing by viewModel.isProcessing.collectAsState()
     val error by viewModel.error.collectAsState()
-    val serverHealthy by viewModel.serverHealthy.collectAsState()
 
     var imageCaptureRef by remember { mutableStateOf<ImageCapture?>(null) }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Server Status Bar
-        AnimatedVisibility(
-            visible = !serverHealthy,
-            enter = slideInVertically(),
-            exit = slideOutVertically()
-        ) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(8.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))
-            ) {
-                Text(
-                    "⚠️ Python server chưa kết nối",
-                    modifier = Modifier.padding(12.dp),
-                    color = Color(0xFFC62828)
-                )
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            viewModel.onScanStarted()
+            recognizeFromUri(context, it) { text ->
+                viewModel.onTextScanned(text)
             }
         }
+    }
 
-        // Camera Preview
+    Column(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.weight(0.4f)) {
             if (cameraPermission.status.isGranted) {
                 AndroidView(
@@ -148,37 +116,22 @@ fun ScanTabContent(
                         val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                         cameraProviderFuture.addListener({
                             val cameraProvider = cameraProviderFuture.get()
-                            val preview = Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
-                            val imageCapture = ImageCapture.Builder()
-                                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                                .build()
-
-                            imageCaptureRef = imageCapture
-                            onImageCaptureChange(imageCapture)
-
+                            val preview = Preview.Builder().build().also { it.setSurfaceProvider(previewView.surfaceProvider) }
+                            val capture = ImageCapture.Builder().build()
+                            imageCaptureRef = capture
+                            onImageCaptureChange(capture)
                             cameraProvider.unbindAll()
-                            cameraProvider.bindToLifecycle(
-                                lifecycleOwner,
-                                CameraSelector.DEFAULT_BACK_CAMERA,
-                                preview,
-                                imageCapture
-                            )
+                            cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, capture)
                         }, ContextCompat.getMainExecutor(ctx))
                         previewView
                     },
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
-                Text(
-                    "Cần quyền Camera để scan tài liệu",
-                    modifier = Modifier.align(Alignment.Center)
-                )
+                Text("Cần quyền Camera", modifier = Modifier.align(Alignment.Center))
             }
         }
 
-        // Results & Actions
         Column(
             modifier = Modifier
                 .weight(0.6f)
@@ -186,167 +139,91 @@ fun ScanTabContent(
                 .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Scan Button
-            Button(
-                onClick = {
-                    viewModel.onScanStarted()
-                    captureAndRecognize(imageCaptureRef) { text ->
-                        viewModel.onTextScanned(text)
-                    }
-                },
-                enabled = !isProcessing && cameraPermission.status.isGranted,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                AnimatedContent(
-                    targetState = isProcessing,
-                    label = "button_animation"
-                ) { processing ->
-                    if (processing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            color = Color.White,
-                            strokeWidth = 2.dp
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("⏳ Đang xử lý...")
+            // Nút Scan và Chọn từ Thư viện
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        viewModel.onScanStarted()
+                        captureAndRecognize(imageCaptureRef) { text -> viewModel.onTextScanned(text) }
+                    },
+                    enabled = !isProcessing && cameraPermission.status.isGranted,
+                    modifier = Modifier.weight(1f).height(50.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    if (isProcessing) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White)
                     } else {
-                        Text("📸 Scan tài liệu")
+                        Text("📸 Chụp ảnh")
                     }
+                }
+
+                FilledTonalButton(
+                    onClick = { galleryLauncher.launch("image/*") },
+                    enabled = !isProcessing,
+                    modifier = Modifier.height(50.dp),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Text("🖼 Thư viện")
                 }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Error Display
-            AnimatedVisibility(
-                visible = error != null,
-                enter = slideInVertically() + fadeIn(),
-                exit = slideOutVertically() + fadeOut()
-            ) {
-                error?.let {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .animateContentSize(),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text("❌ Lỗi", style = MaterialTheme.typography.titleMedium)
-                            Text(it, color = Color(0xFFC62828))
-                            Spacer(modifier = Modifier.height(8.dp))
+            if (error != null) {
+                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFFFEBEE))) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(" $error", color = Color.Red)
+                        Button(onClick = { viewModel.retryClassification() }) { Text("Thử lại") }
+                    }
+                }
+            }
+
+            if (documentType.isNotEmpty() && error == null) {
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(" Loại: $documentType", style = MaterialTheme.typography.titleLarge)
+                        LinearProgressIndicator(progress = { confidence.toFloat() }, modifier = Modifier.fillMaxWidth().height(8.dp))
+                        Text("Độ tin cậy: ${(confidence * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
+
+            if (summary.isNotEmpty() && error == null) {
+                Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(12.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("📝 Thông tin trích xuất", style = MaterialTheme.typography.titleMedium)
+                        Text(summary, style = MaterialTheme.typography.bodyMedium)
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Button(
-                                onClick = { viewModel.retryClassification() },
-                                modifier = Modifier.align(Alignment.End)
+                                onClick = { viewModel.exportToPdf(context) },
+                                modifier = Modifier.weight(1f)
                             ) {
-                                Text("Thử lại")
+                                Text(" Lưu PDF")
+                            }
+                            Button(
+                                onClick = { viewModel.shareResult(context) },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                            ) {
+                                Text(" Chia sẻ")
                             }
                         }
                     }
                 }
             }
 
-            // Classification Result
-            AnimatedVisibility(
-                visible = documentType.isNotEmpty() && error == null,
-                enter = slideInVertically(initialOffsetY = { 100 }) + fadeIn(),
-                exit = slideOutVertically() + fadeOut()
-            ) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .animateContentSize(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            "📂 Phân loại",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = documentType,
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        LinearProgressIndicator(
-                            progress = { confidence.toFloat() },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(8.dp),
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            "Độ tin cậy: ${(confidence * 100).toInt()}%",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Summary
-            AnimatedVisibility(
-                visible = summary.isNotEmpty() && error == null,
-                enter = slideInVertically(initialOffsetY = { 100 }) + fadeIn(),
-                exit = slideOutVertically() + fadeOut()
-            ) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .animateContentSize(),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            "📝 Thông tin trích xuất",
-                            style = MaterialTheme.typography.titleMedium
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            summary,
-                            style = MaterialTheme.typography.bodyMedium,
-                            maxLines = 10,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            // Original Text (Expandable)
             if (scannedText.isNotEmpty()) {
                 var showOriginal by remember { mutableStateOf(false) }
-                OutlinedButton(
-                    onClick = { showOriginal = !showOriginal },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                OutlinedButton(onClick = { showOriginal = !showOriginal }, modifier = Modifier.fillMaxWidth()) {
                     Text(if (showOriginal) "▲ Ẩn văn bản gốc" else "▼ Xem văn bản gốc")
                 }
-
-                AnimatedVisibility(
-                    visible = showOriginal,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut()
-                ) {
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 8.dp),
-                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F5F5)),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text(
-                            scannedText,
-                            modifier = Modifier.padding(12.dp),
-                            style = MaterialTheme.typography.bodySmall
-                        )
+                if (showOriginal) {
+                    Card(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F5F5))) {
+                        Text(scannedText, modifier = Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
                     }
                 }
             }
@@ -355,197 +232,62 @@ fun ScanTabContent(
 }
 
 @Composable
-fun HistoryTabContent(
-    viewModel: ScannerViewModel,
-    recentDocuments: List<com.securedoc.ai.data.local.DocumentEntity>
-) {
+fun HistoryTabContent(viewModel: ScannerViewModel, recentDocuments: List<com.securedoc.ai.data.local.DocumentEntity>) {
     if (recentDocuments.isEmpty()) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Icon(
-                imageVector = Icons.Default.Info,
-                contentDescription = "No history",
-                modifier = Modifier.size(64.dp),
-                tint = Color.Gray
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "Chưa có scan nào",
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.Gray
-            )
+        Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(64.dp), tint = Color.Gray)
+            Text("Chưa có lịch sử scan nào", color = Color.Gray)
         }
     } else {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items(recentDocuments) { document ->
-                HistoryCard(
-                    document = document,
-                    viewModel = viewModel
-                )
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(recentDocuments) { doc ->
+                HistoryCard(doc, viewModel)
             }
         }
     }
 }
 
 @Composable
-fun HistoryCard(
-    document: com.securedoc.ai.data.local.DocumentEntity,
-    viewModel: ScannerViewModel
-) {
+fun HistoryCard(document: com.securedoc.ai.data.local.DocumentEntity, viewModel: ScannerViewModel) {
     var showDetails by remember { mutableStateOf(false) }
-
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .animateContentSize()
-            .background(
-                color = when (document.documentType) {
-                    "HÓA ĐƠN" -> Color(0xFFE3F2FD)
-                    "HỢP ĐỒNG" -> Color(0xFFF3E5F5)
-                    "CMND" -> Color(0xFFE8F5E9)
-                    else -> Color(0xFFFFF3E0)
-                },
-                shape = RoundedCornerShape(12.dp)
-            ),
-        shape = RoundedCornerShape(12.dp)
-    ) {
+    Card(modifier = Modifier.fillMaxWidth().animateContentSize()) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // Header
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        document.documentType,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Text(
-                        viewModel.formatDate(document.timestamp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.Gray
-                    )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Column {
+                    Text(document.documentType, style = MaterialTheme.typography.titleMedium)
+                    Text(viewModel.formatDate(document.timestamp), style = MaterialTheme.typography.bodySmall, color = Color.Gray)
                 }
-                Column(
-                    horizontalAlignment = Alignment.End,
-                    modifier = Modifier.padding(start = 8.dp)
-                ) {
-                    Text(
-                        "${(document.confidence * 100).toInt()}%",
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    Icon(
-                        imageVector = Icons.Default.Delete,
-                        contentDescription = "Delete",
-                        modifier = Modifier
-                            .size(20.dp)
-                            .clickable { viewModel.deleteDocument(document.id) },
-                        tint = Color(0xFFC62828)
-                    )
-                }
+                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.clickable { viewModel.deleteDocument(document.id) }, tint = Color.Red)
             }
-
-            // Expandable Details
             if (showDetails) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Divider()
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    "📋 Văn bản gốc:",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray
-                )
-                Text(
-                    document.scannedText.take(150) + if (document.scannedText.length > 150) "..." else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    "📝 Tóm tắt:",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.Gray
-                )
-                Text(
-                    document.summary.take(150) + if (document.summary.length > 150) "..." else "",
-                    style = MaterialTheme.typography.bodySmall,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Button(
-                    onClick = { viewModel.restoreFromHistory(document) },
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("Xem chi tiết")
-                }
+                Text(document.summary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
             }
-
-            // Toggle Details
-            OutlinedButton(
-                onClick = { showDetails = !showDetails },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(36.dp),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text(if (showDetails) "▲ Ẩn chi tiết" else "▼ Xem chi tiết")
+            OutlinedButton(onClick = { showDetails = !showDetails }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                Text(if (showDetails) "Ẩn chi tiết" else "Xem chi tiết")
             }
         }
     }
 }
 
-private fun captureAndRecognize(
-    imageCapture: ImageCapture?,
-    onResult: (String) -> Unit
-) {
-    val executor = Executors.newSingleThreadExecutor()
-    imageCapture?.takePicture(executor, object : ImageCapture.OnImageCapturedCallback() {
+private fun captureAndRecognize(imageCapture: ImageCapture?, onResult: (String) -> Unit) {
+    imageCapture?.takePicture(Executors.newSingleThreadExecutor(), object : ImageCapture.OnImageCapturedCallback() {
         override fun onCaptureSuccess(image: ImageProxy) {
-            try {
-                val inputImage = InputImage.fromMediaImage(
-                    image.image!!,
-                    image.imageInfo.rotationDegrees
-                )
-                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-
-                recognizer.process(inputImage)
-                    .addOnSuccessListener { result ->
-                        val text = result.text.ifEmpty { "Không tìm thấy text" }
-                        onResult(text)
-                        image.close()
-                    }
-                    .addOnFailureListener {
-                        onResult("Lỗi OCR: ${it.message}")
-                        image.close()
-                    }
-            } catch (e: Exception) {
-                onResult("Lỗi: ${e.message}")
-                image.close()
-            }
-        }
-
-        override fun onError(exception: ImageCaptureException) {
-            onResult("Lỗi camera: ${exception.message}")
+            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+            recognizer.process(InputImage.fromMediaImage(image.image!!, image.imageInfo.rotationDegrees))
+                .addOnSuccessListener { onResult(it.text.ifEmpty { "Không tìm thấy text" }); image.close() }
+                .addOnFailureListener { onResult("Lỗi OCR"); image.close() }
         }
     })
+}
+
+private fun recognizeFromUri(context: android.content.Context, uri: Uri, onResult: (String) -> Unit) {
+    try {
+        val inputImage = InputImage.fromFilePath(context, uri)
+        val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+        recognizer.process(inputImage)
+            .addOnSuccessListener { onResult(it.text.ifEmpty { "Không tìm thấy text" }) }
+            .addOnFailureListener { onResult("Lỗi OCR") }
+    } catch (e: Exception) {
+        onResult("Lỗi xử lý ảnh")
+    }
 }

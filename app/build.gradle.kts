@@ -104,4 +104,14 @@ dependencies {
     implementation("com.google.accompanist:accompanist-permissions:0.32.0")
     // Animation
     implementation("androidx.compose.animation:animation:1.6.0")
+
+    // PDF Generation
+    implementation("com.itextpdf:itextpdf:5.5.13.3")
+
+    // Image Picker
+    implementation("androidx.activity:activity-ktx:1.8.1")
+    implementation("androidx.activity:activity-compose:1.8.1")
+
+    // File Provider
+    implementation("androidx.core:core:1.12.0")
 }

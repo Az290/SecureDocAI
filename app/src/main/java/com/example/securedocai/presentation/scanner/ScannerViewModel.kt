@@ -1,10 +1,14 @@
 package com.securedoc.ai.presentation.scanner
 
+import android.content.Context
+import android.content.Intent
+import android.widget.Toast
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.securedoc.ai.data.local.DocumentEntity
 import com.securedoc.ai.data.local.LocalDocumentRepository
 import com.securedoc.ai.data.remote.DocumentRepository
+import com.securedoc.ai.utils.PdfExporter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -17,7 +21,6 @@ class ScannerViewModel @Inject constructor(
     private val repository: DocumentRepository
 ) : ViewModel() {
 
-    // UI States - Current Scan
     private val _scannedText = MutableStateFlow("")
     val scannedText: StateFlow<String> = _scannedText
 
@@ -39,12 +42,8 @@ class ScannerViewModel @Inject constructor(
     private val _serverHealthy = MutableStateFlow(false)
     val serverHealthy: StateFlow<Boolean> = _serverHealthy
 
-    // History States
     private val _recentDocuments = MutableStateFlow<List<DocumentEntity>>(emptyList())
     val recentDocuments: StateFlow<List<DocumentEntity>> = _recentDocuments
-
-    private val _isLoadingHistory = MutableStateFlow(false)
-    val isLoadingHistory: StateFlow<Boolean> = _isLoadingHistory
 
     private val _documentCount = MutableStateFlow(0)
     val documentCount: StateFlow<Int> = _documentCount
@@ -55,7 +54,6 @@ class ScannerViewModel @Inject constructor(
         loadDocumentCount()
     }
 
-    // ==================== SERVER HEALTH ====================
     private fun checkServerHealth() {
         viewModelScope.launch {
             try {
@@ -66,11 +64,9 @@ class ScannerViewModel @Inject constructor(
         }
     }
 
-    // ==================== CURRENT SCAN ====================
     fun onTextScanned(text: String) {
         _scannedText.value = text
         _error.value = null
-
         if (text.isNotEmpty() && text != "Không tìm thấy text") {
             processDocument(text)
         }
@@ -81,57 +77,30 @@ class ScannerViewModel @Inject constructor(
         _summary.value = ""
         _confidence.value = 0.0
         _error.value = null
+        _isProcessing.value = true
     }
 
     private fun processDocument(text: String) {
         viewModelScope.launch {
-            _isProcessing.value = true
-            _error.value = null
-
             try {
-                // Bước 1: Phân loại bằng ML
-                android.util.Log.d("Scanner", " Đang phân loại...")
                 val classifyResult = repository.classifyDocument(text)
-
                 _documentType.value = classifyResult.label
                 _confidence.value = classifyResult.confidence
 
-                android.util.Log.d(
-                    "Scanner",
-                    "✅ Loại: ${classifyResult.label} (${classifyResult.confidence * 100}%)"
-                )
-
-                // Bước 2: Tóm tắt bằng Groq
-                android.util.Log.d("Scanner", " Đang tóm tắt...")
                 val summary = repository.summarizeDocument(text, classifyResult.label)
                 _summary.value = summary
 
-                android.util.Log.d("Scanner", " Tóm tắt xong")
-
-                // Bước 3: Lưu vào history
-                android.util.Log.d("Scanner", " Đang lưu...")
                 localRepository.saveDocument(
                     scannedText = text,
                     documentType = classifyResult.label,
                     confidence = classifyResult.confidence,
                     summary = summary
                 )
-                android.util.Log.d("Scanner", " Lưu xong")
-
-                // Reload history
                 loadRecentDocuments()
                 loadDocumentCount()
 
             } catch (e: Exception) {
-                android.util.Log.e("Scanner", " Error: ${e.message}", e)
-                _error.value = when {
-                    e.message?.contains("Unable to resolve host") == true ->
-                        " Không kết nối Python server. Kiểm tra server đang chạy?"
-                    e.message?.contains("timeout") == true ->
-                        " Server phản hồi quá lâu"
-                    else ->
-                        " Lỗi: ${e.message}"
-                }
+                _error.value = "Lỗi: ${e.message}"
             } finally {
                 _isProcessing.value = false
             }
@@ -140,48 +109,29 @@ class ScannerViewModel @Inject constructor(
 
     fun retryClassification() {
         if (_scannedText.value.isNotEmpty()) {
+            _isProcessing.value = true
             processDocument(_scannedText.value)
         }
     }
 
-    // ==================== HISTORY MANAGEMENT ====================
+    // --- HISTORY ---
     fun loadRecentDocuments() {
         viewModelScope.launch {
-            _isLoadingHistory.value = true
-            try {
-                val documents = localRepository.getRecentDocuments()
-                _recentDocuments.value = documents
-                android.util.Log.d("Scanner", " Loaded ${documents.size} recent documents")
-            } catch (e: Exception) {
-                android.util.Log.e("Scanner", "Error loading documents: ${e.message}")
-            } finally {
-                _isLoadingHistory.value = false
-            }
+            _recentDocuments.value = localRepository.getRecentDocuments()
         }
     }
 
     fun loadDocumentCount() {
         viewModelScope.launch {
-            try {
-                val count = localRepository.getDocumentCount()
-                _documentCount.value = count
-                android.util.Log.d("Scanner", "Total documents: $count")
-            } catch (e: Exception) {
-                android.util.Log.e("Scanner", "Error loading count: ${e.message}")
-            }
+            _documentCount.value = localRepository.getDocumentCount()
         }
     }
 
     fun deleteDocument(id: Int) {
         viewModelScope.launch {
-            try {
-                localRepository.deleteDocument(id)
-                loadRecentDocuments()
-                loadDocumentCount()
-                android.util.Log.d("Scanner", "🗑 Deleted document $id")
-            } catch (e: Exception) {
-                android.util.Log.e("Scanner", "Error deleting document: ${e.message}")
-            }
+            localRepository.deleteDocument(id)
+            loadRecentDocuments()
+            loadDocumentCount()
         }
     }
 
@@ -192,18 +142,46 @@ class ScannerViewModel @Inject constructor(
         _summary.value = document.summary
     }
 
-    // ==================== UTILITY ====================
     fun formatDate(timestamp: Long): String {
         val date = java.util.Date(timestamp)
         val sdf = java.text.SimpleDateFormat("HH:mm dd/MM/yyyy", java.util.Locale("vi", "VN"))
         return sdf.format(date)
     }
 
-    fun clearCurrentScan() {
-        _scannedText.value = ""
-        _documentType.value = ""
-        _confidence.value = 0.0
-        _summary.value = ""
-        _error.value = null
+    // --- EXPORT & SHARE ---
+    fun exportToPdf(context: Context) {
+        val success = PdfExporter.exportToPdf(
+            context = context,
+            documentType = _documentType.value,
+            confidence = _confidence.value,
+            scannedText = _scannedText.value,
+            summary = _summary.value
+        )
+        if (success) {
+            Toast.makeText(context, "Đã lưu PDF vào thư mục ẩn của App!", Toast.LENGTH_LONG).show()
+        } else {
+            Toast.makeText(context, "Lỗi khi lưu PDF", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    fun shareResult(context: Context) {
+        val shareText = """
+            BÁO CÁO PHÂN LOẠI TÀI LIỆU
+            
+            Loại: ${_documentType.value}
+            Độ tin cậy: ${(_confidence.value * 100).toInt()}%
+            
+            Thông tin trích xuất:
+            ${_summary.value}
+            
+            ~ Tạo bởi SecureDocAI ~
+        """.trimIndent()
+
+        val shareIntent = Intent().apply {
+            action = Intent.ACTION_SEND
+            putExtra(Intent.EXTRA_TEXT, shareText)
+            type = "text/plain"
+        }
+        context.startActivity(Intent.createChooser(shareIntent, "Chia sẻ qua"))
     }
 }
